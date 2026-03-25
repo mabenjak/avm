@@ -19,6 +19,43 @@
 
 #include "tools/stream_mux.h"
 
+static std::vector<uint8_t> extract_seq_header_obu(const uint8_t *data,
+                                                    int length) {
+  const int kObuHeaderSizeBytes = 1;
+  const int kMinimumBytesRequired = 1 + kObuHeaderSizeBytes;
+  int consumed = 0;
+
+  while (consumed < length) {
+    const int remaining = length - consumed;
+    if (remaining < kMinimumBytesRequired) break;
+
+    size_t length_field_size = 0;
+    uint64_t obu_total_size = 0;
+
+    if (avm_uleb_decode(data + consumed, remaining, &obu_total_size,
+                        &length_field_size) != 0) {
+      break;
+    }
+
+    const uint8_t obu_header_byte = *(data + consumed + length_field_size);
+    ObuHeader obu_header;
+    memset(&obu_header, 0, sizeof(obu_header));
+    if (!ParseAV2ObuHeader(obu_header_byte, &obu_header)) break;
+
+    const int obu_with_prefix =
+        static_cast<int>(obu_total_size) + static_cast<int>(length_field_size);
+
+    if (obu_header.type == OBU_SEQUENCE_HEADER) {
+      return std::vector<uint8_t>(data + consumed,
+                                  data + consumed + obu_with_prefix);
+    }
+
+    consumed += obu_with_prefix;
+  }
+
+  return std::vector<uint8_t>();
+}
+
 static bool tu_contains_sframe(const uint8_t *data, int length, bool verbose,
                                 bool detect_switch, bool detect_ras,
                                 int *obu_count) {
@@ -88,6 +125,7 @@ int main(int argc, const char *argv[]) {
   bool verbose = false;
   bool detect_switch = true;
   bool detect_ras = true;
+  bool check_seq_params = true;
   int arg_idx = 1;
 
   // Parse optional flags
@@ -108,6 +146,12 @@ int main(int argc, const char *argv[]) {
       detect_switch = false;
     } else if (strcmp(argv[arg_idx], "--no-ras") == 0) {
       detect_ras = false;
+    } else if (strcmp(argv[arg_idx], "--check-seq-params") == 0) {
+      if (arg_idx + 1 >= argc) {
+        fprintf(stderr, "Error: --check-seq-params requires a value.\n");
+        return EXIT_FAILURE;
+      }
+      check_seq_params = atoi(argv[++arg_idx]) != 0;
     } else {
       fprintf(stderr, "Error: unknown option '%s'.\n", argv[arg_idx]);
       return EXIT_FAILURE;
@@ -124,7 +168,7 @@ int main(int argc, const char *argv[]) {
   if (argc - arg_idx != 3) {
     fprintf(stderr,
             "Usage: %s [--skip-switches N] [--verbose] [--no-switch] "
-            "[--no-ras] <input1> <input2> <output>\n",
+            "[--no-ras] [--check-seq-params 0|1] <input1> <input2> <output>\n",
             argv[0]);
     return EXIT_FAILURE;
   }
@@ -187,6 +231,56 @@ int main(int argc, const char *argv[]) {
     fclose(fin1);
     fclose(fin2);
     return EXIT_FAILURE;
+  }
+
+  // Check sequence header compatibility
+  if (check_seq_params) {
+    std::vector<uint8_t> seq_hdr1, seq_hdr2;
+
+    // Scan stream 1 for a sequence header
+    while (seq_hdr1.empty()) {
+      size_t unit_size = 0;
+      if (!ReadTemporalUnit(&input1, &unit_size)) break;
+      seq_hdr1 = extract_seq_header_obu(input1.unit_buffer,
+                                         static_cast<int>(unit_size));
+    }
+
+    // Scan stream 2 for a sequence header
+    while (seq_hdr2.empty()) {
+      size_t unit_size = 0;
+      if (!ReadTemporalUnit(&input2, &unit_size)) break;
+      seq_hdr2 = extract_seq_header_obu(input2.unit_buffer,
+                                         static_cast<int>(unit_size));
+    }
+
+    if (seq_hdr1.empty() || seq_hdr2.empty()) {
+      fprintf(stderr,
+              "Warning: could not find sequence header in %s, "
+              "skipping sequence parameter check.\n",
+              seq_hdr1.empty() ? "stream1" : "stream2");
+    } else if (seq_hdr1 != seq_hdr2) {
+      fprintf(stderr,
+              "Error: sequence headers differ between stream1 (%zu bytes) "
+              "and stream2 (%zu bytes). Streams are not compatible.\n",
+              seq_hdr1.size(), seq_hdr2.size());
+      fclose(fin1);
+      fclose(fin2);
+      fclose(fout);
+      return EXIT_FAILURE;
+    } else {
+      printf("Sequence header check: OK (%zu bytes match)\n", seq_hdr1.size());
+    }
+
+    // Rewind both inputs and re-initialize contexts
+    fseek(fin1, 0, SEEK_SET);
+    input1.Init();
+    avx_ctx1.file = fin1;
+    avx_ctx1.file_type = GetFileType(&input1);
+
+    fseek(fin2, 0, SEEK_SET);
+    input2.Init();
+    avx_ctx2.file = fin2;
+    avx_ctx2.file_type = GetFileType(&input2);
   }
 
   const int target_sframe = skip_switches + 1;
