@@ -875,6 +875,17 @@ if(ENABLE_TOOLS)
     list(APPEND AVM_TOOL_TARGETS stream_demuxer)
     list(APPEND AVM_APP_TARGETS stream_demuxer)
 
+    add_executable(
+      switch_muxer
+      "${AVM_GEN_SRC_DIR}/usage_exit.cc"
+      "${AVM_ROOT}/tools/stream_mux.h"
+      "${AVM_ROOT}/tools/switch_muxer.cc"
+      $<TARGET_OBJECTS:avm_common_app_util>
+      $<TARGET_OBJECTS:avm_decoder_app_util>)
+
+    list(APPEND AVM_TOOL_TARGETS switch_muxer)
+    list(APPEND AVM_APP_TARGETS switch_muxer)
+
     # Maintain a separate variable listing only the tools to facilitate
     # installation of tool programs into a tools sub directory.
     list(APPEND AVM_TOOL_TARGETS ${AVM_DECODER_TOOL_TARGETS}
