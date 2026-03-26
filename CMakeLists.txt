@@ -400,6 +400,8 @@ if((CONFIG_AV2_DECODER OR CONFIG_AV2_ENCODER) AND ENABLE_EXAMPLES)
     "${AVM_ROOT}/tools/lanczos/lanczos_resample.h"
     "${AVM_ROOT}/tools/lanczos/lanczos_resample_filter.c")
   list(APPEND AVM_APP_TARGETS lanczos_resample_filter)
+  add_executable(yuv_splitter "${AVM_ROOT}/tools/yuv_splitter.c")
+  list(APPEND AVM_APP_TARGETS yuv_splitter)
 endif()
 
 if(CONFIG_AV2_DECODER)
