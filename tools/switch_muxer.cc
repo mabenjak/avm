@@ -562,6 +562,7 @@ int main(int argc, const char *argv[]) {
   bool detect_switch = true;
   bool detect_ras = true;
   bool check_seq_params = true;
+  int align_tu = -1;  // -1=disabled, 0=use stream2 S-frame TU index, >0=explicit
   int arg_idx = 1;
 
   // Parse optional flags
@@ -582,6 +583,17 @@ int main(int argc, const char *argv[]) {
       detect_switch = false;
     } else if (strcmp(argv[arg_idx], "--no-ras") == 0) {
       detect_ras = false;
+    } else if (strcmp(argv[arg_idx], "--align-tu") == 0) {
+      align_tu = 0;
+      // Check if the next argument is a numeric value (optional parameter)
+      if (arg_idx + 1 < argc && argv[arg_idx + 1][0] != '-') {
+        char *endptr = nullptr;
+        long val = strtol(argv[arg_idx + 1], &endptr, 10);
+        if (endptr != argv[arg_idx + 1] && *endptr == '\0' && val > 0) {
+          align_tu = static_cast<int>(val);
+          ++arg_idx;
+        }
+      }
     } else if (strcmp(argv[arg_idx], "--check-seq-params") == 0) {
       if (arg_idx + 1 >= argc) {
         fprintf(stderr, "Error: --check-seq-params requires a value.\n");
@@ -604,7 +616,8 @@ int main(int argc, const char *argv[]) {
   if (argc - arg_idx != 3) {
     fprintf(stderr,
             "Usage: %s [--skip-switches N] [--verbose] [--no-switch] "
-            "[--no-ras] [--check-seq-params 0|1] <input1> <input2> <output>\n",
+            "[--no-ras] [--check-seq-params 0|1] [--align-tu [N]] "
+            "<input1> <input2> <output>\n",
             argv[0]);
     return EXIT_FAILURE;
   }
@@ -752,109 +765,241 @@ int main(int argc, const char *argv[]) {
   int obus_from_stream1 = 0;
   int obus_from_stream2 = 0;
 
-  // Phase 1: Output TUs from stream 1 until the (N+1)-th S-frame
-  if (verbose) printf("--- Phase 1: reading from stream1 ---\n");
-  while (true) {
-    size_t unit_size = 0;
-    if (!ReadTemporalUnit(&input1, &unit_size)) {
-      fprintf(stderr,
-              "Error: stream1 ended before finding S-frame #%d.\n",
-              target_sframe);
-      fclose(fin1);
-      fclose(fin2);
-      fclose(fout);
-      return EXIT_FAILURE;
-    }
+  if (align_tu >= 0) {
+    // --align-tu mode: find the Nth S-frame in stream 2, then cut stream 1
+    // at the same TU index (or a user-specified count) with no S-frame
+    // detection needed on stream 1.
 
-    int tu_obus = 0;
-    bool is_sframe = tu_contains_sframe(
-        input1.unit_buffer, static_cast<int>(unit_size), verbose,
-        detect_switch, detect_ras, &tu_obus);
-
-    if (is_sframe) {
-      ++sframe_count;
-      if (sframe_count >= target_sframe) {
-        if (verbose) {
-          printf("    TU #%d (stream1): S-frame #%d found, stopping stream1\n",
-                 tu_index1, sframe_count);
-        }
-        break;
+    // Phase 1: Scan stream 2 to find the Nth S-frame and record its TU index
+    if (verbose) printf("--- Phase 1: scanning stream2 for S-frame ---\n");
+    int switch_tu_index = -1;
+    size_t switch_tu_size = 0;
+    while (true) {
+      size_t unit_size = 0;
+      if (!ReadTemporalUnit(&input2, &unit_size)) {
+        fprintf(stderr,
+                "Error: stream2 ended before finding S-frame #%d.\n",
+                target_sframe);
+        fclose(fin1);
+        fclose(fin2);
+        fclose(fout);
+        return EXIT_FAILURE;
       }
-    }
 
-    obus_from_stream1 += tu_obus;
-    fwrite(input1.unit_buffer, 1, unit_size, fout);
-    if (verbose) {
-      printf("    TU #%d (stream1): output%s\n", tu_index1,
-             is_sframe ? " [S-frame]" : "");
-    }
-    ++tu_index1;
-  }
-
-  // Phase 2: Advance stream 2 to the (N+1)-th S-frame
-  if (verbose) printf("--- Phase 2: advancing stream2 ---\n");
-  sframe_count = 0;
-  while (true) {
-    size_t unit_size = 0;
-    if (!ReadTemporalUnit(&input2, &unit_size)) {
-      fprintf(stderr,
-              "Error: stream2 ended before finding S-frame #%d.\n",
-              target_sframe);
-      fclose(fin1);
-      fclose(fin2);
-      fclose(fout);
-      return EXIT_FAILURE;
-    }
-
-    bool is_sframe = tu_contains_sframe(
-        input2.unit_buffer, static_cast<int>(unit_size), verbose,
-        detect_switch, detect_ras, NULL);
-
-    if (is_sframe) {
-      ++sframe_count;
-      if (sframe_count >= target_sframe) {
-        // Phase 2b: Output the switch TU from stream 2
-        tu_contains_sframe(input2.unit_buffer, static_cast<int>(unit_size),
-                           false, detect_switch, detect_ras, &obus_from_stream2);
-        if (verbose) {
-          printf(
-              "=== SWITCH at S-frame #%d, stream1 TU #%d -> stream2 TU #%d "
-              "===\n",
-              target_sframe, tu_index1, tu_index2);
-          printf("    TU #%d (stream2): output [S-frame, switch point]\n",
-                 tu_index2);
-        }
-        fwrite(input2.unit_buffer, 1, unit_size, fout);
-        ++tu_index2;
-        break;
-      }
-    }
-
-    if (verbose) {
-      printf("    TU #%d (stream2): discarded%s\n", tu_index2,
-             is_sframe ? " [S-frame]" : "");
-    }
-    ++tu_index2;
-  }
-
-  // Phase 3: Output remaining TUs from stream 2
-  if (verbose) printf("--- Phase 3: reading remainder of stream2 ---\n");
-  while (true) {
-    size_t unit_size = 0;
-    if (!ReadTemporalUnit(&input2, &unit_size)) break;
-
-    if (verbose) {
       bool is_sframe = tu_contains_sframe(
-          input2.unit_buffer, static_cast<int>(unit_size), true,
-          detect_switch, detect_ras, &obus_from_stream2);
-      printf("    TU #%d (stream2): output%s\n", tu_index2,
-             is_sframe ? " [S-frame]" : "");
-    } else {
-      tu_contains_sframe(input2.unit_buffer, static_cast<int>(unit_size),
-                         false, detect_switch, detect_ras, &obus_from_stream2);
+          input2.unit_buffer, static_cast<int>(unit_size), verbose,
+          detect_switch, detect_ras, NULL);
+
+      if (is_sframe) {
+        ++sframe_count;
+        if (sframe_count >= target_sframe) {
+          switch_tu_index = tu_index2;
+          switch_tu_size = unit_size;
+          if (verbose) {
+            printf(
+                "    TU #%d (stream2): S-frame #%d found, switch_tu_index=%d\n",
+                tu_index2, sframe_count, switch_tu_index);
+          }
+          break;
+        }
+      }
+
+      if (verbose) {
+        printf("    TU #%d (stream2): skipped%s\n", tu_index2,
+               is_sframe ? " [S-frame]" : "");
+      }
+      ++tu_index2;
     }
-    fwrite(input2.unit_buffer, 1, unit_size, fout);
+
+    // Save the S-frame TU data from stream 2 (the buffer will be overwritten
+    // when we read subsequent TUs from stream 2, but we need it after reading
+    // stream 1).
+    std::vector<uint8_t> switch_tu_data(input2.unit_buffer,
+                                        input2.unit_buffer + switch_tu_size);
+
+    // If the user specified an explicit TU count, use that instead of
+    // the stream 2 S-frame TU index.
+    int output_tu_count = (align_tu > 0) ? align_tu : switch_tu_index;
+
+    // Phase 2: Output output_tu_count TUs from stream 1
+    if (verbose)
+      printf("--- Phase 2: outputting %d TUs from stream1 ---\n",
+             output_tu_count);
+    for (int i = 0; i < output_tu_count; ++i) {
+      size_t unit_size = 0;
+      if (!ReadTemporalUnit(&input1, &unit_size)) {
+        fprintf(stderr,
+                "Error: stream1 ended at TU #%d, needed %d TUs to reach "
+                "switch point.\n",
+                i, output_tu_count);
+        fclose(fin1);
+        fclose(fin2);
+        fclose(fout);
+        return EXIT_FAILURE;
+      }
+
+      int tu_obus = 0;
+      if (verbose) {
+        tu_contains_sframe(input1.unit_buffer, static_cast<int>(unit_size),
+                           true, detect_switch, detect_ras, &tu_obus);
+        printf("    TU #%d (stream1): output\n", tu_index1);
+      } else {
+        tu_contains_sframe(input1.unit_buffer, static_cast<int>(unit_size),
+                           false, detect_switch, detect_ras, &tu_obus);
+      }
+      obus_from_stream1 += tu_obus;
+      fwrite(input1.unit_buffer, 1, unit_size, fout);
+      ++tu_index1;
+    }
+
+    // Phase 3: Output the S-frame TU from stream 2, then the rest of stream 2
+    if (verbose) {
+      printf("=== SWITCH at TU index %d, stream1 TU #%d -> stream2 TU #%d "
+             "===\n",
+             switch_tu_index, tu_index1, switch_tu_index);
+      printf("--- Phase 3: outputting stream2 from S-frame onward ---\n");
+    }
+
+    // Output the saved S-frame TU
+    tu_contains_sframe(switch_tu_data.data(),
+                       static_cast<int>(switch_tu_data.size()), false,
+                       detect_switch, detect_ras, &obus_from_stream2);
+    fwrite(switch_tu_data.data(), 1, switch_tu_data.size(), fout);
+    if (verbose) {
+      printf("    TU #%d (stream2): output [S-frame, switch point]\n",
+             tu_index2);
+    }
     ++tu_index2;
+
+    // Output remaining TUs from stream 2
+    while (true) {
+      size_t unit_size = 0;
+      if (!ReadTemporalUnit(&input2, &unit_size)) break;
+
+      if (verbose) {
+        bool is_sframe = tu_contains_sframe(
+            input2.unit_buffer, static_cast<int>(unit_size), true,
+            detect_switch, detect_ras, &obus_from_stream2);
+        printf("    TU #%d (stream2): output%s\n", tu_index2,
+               is_sframe ? " [S-frame]" : "");
+      } else {
+        tu_contains_sframe(input2.unit_buffer, static_cast<int>(unit_size),
+                           false, detect_switch, detect_ras,
+                           &obus_from_stream2);
+      }
+      fwrite(input2.unit_buffer, 1, unit_size, fout);
+      ++tu_index2;
+    }
+  } else {
+    // Default mode: find Nth S-frame in both streams independently.
+
+    // Phase 1: Output TUs from stream 1 until the (N+1)-th S-frame
+    if (verbose) printf("--- Phase 1: reading from stream1 ---\n");
+    while (true) {
+      size_t unit_size = 0;
+      if (!ReadTemporalUnit(&input1, &unit_size)) {
+        fprintf(stderr,
+                "Error: stream1 ended before finding S-frame #%d.\n",
+                target_sframe);
+        fclose(fin1);
+        fclose(fin2);
+        fclose(fout);
+        return EXIT_FAILURE;
+      }
+
+      int tu_obus = 0;
+      bool is_sframe = tu_contains_sframe(
+          input1.unit_buffer, static_cast<int>(unit_size), verbose,
+          detect_switch, detect_ras, &tu_obus);
+
+      if (is_sframe) {
+        ++sframe_count;
+        if (sframe_count >= target_sframe) {
+          if (verbose) {
+            printf(
+                "    TU #%d (stream1): S-frame #%d found, stopping stream1\n",
+                tu_index1, sframe_count);
+          }
+          break;
+        }
+      }
+
+      obus_from_stream1 += tu_obus;
+      fwrite(input1.unit_buffer, 1, unit_size, fout);
+      if (verbose) {
+        printf("    TU #%d (stream1): output%s\n", tu_index1,
+               is_sframe ? " [S-frame]" : "");
+      }
+      ++tu_index1;
+    }
+
+    // Phase 2: Advance stream 2 to the (N+1)-th S-frame
+    if (verbose) printf("--- Phase 2: advancing stream2 ---\n");
+    sframe_count = 0;
+    while (true) {
+      size_t unit_size = 0;
+      if (!ReadTemporalUnit(&input2, &unit_size)) {
+        fprintf(stderr,
+                "Error: stream2 ended before finding S-frame #%d.\n",
+                target_sframe);
+        fclose(fin1);
+        fclose(fin2);
+        fclose(fout);
+        return EXIT_FAILURE;
+      }
+
+      bool is_sframe = tu_contains_sframe(
+          input2.unit_buffer, static_cast<int>(unit_size), verbose,
+          detect_switch, detect_ras, NULL);
+
+      if (is_sframe) {
+        ++sframe_count;
+        if (sframe_count >= target_sframe) {
+          // Phase 2b: Output the switch TU from stream 2
+          tu_contains_sframe(input2.unit_buffer, static_cast<int>(unit_size),
+                             false, detect_switch, detect_ras,
+                             &obus_from_stream2);
+          if (verbose) {
+            printf(
+                "=== SWITCH at S-frame #%d, stream1 TU #%d -> stream2 TU #%d "
+                "===\n",
+                target_sframe, tu_index1, tu_index2);
+            printf("    TU #%d (stream2): output [S-frame, switch point]\n",
+                   tu_index2);
+          }
+          fwrite(input2.unit_buffer, 1, unit_size, fout);
+          ++tu_index2;
+          break;
+        }
+      }
+
+      if (verbose) {
+        printf("    TU #%d (stream2): discarded%s\n", tu_index2,
+               is_sframe ? " [S-frame]" : "");
+      }
+      ++tu_index2;
+    }
+
+    // Phase 3: Output remaining TUs from stream 2
+    if (verbose) printf("--- Phase 3: reading remainder of stream2 ---\n");
+    while (true) {
+      size_t unit_size = 0;
+      if (!ReadTemporalUnit(&input2, &unit_size)) break;
+
+      if (verbose) {
+        bool is_sframe = tu_contains_sframe(
+            input2.unit_buffer, static_cast<int>(unit_size), true,
+            detect_switch, detect_ras, &obus_from_stream2);
+        printf("    TU #%d (stream2): output%s\n", tu_index2,
+               is_sframe ? " [S-frame]" : "");
+      } else {
+        tu_contains_sframe(input2.unit_buffer, static_cast<int>(unit_size),
+                           false, detect_switch, detect_ras,
+                           &obus_from_stream2);
+      }
+      fwrite(input2.unit_buffer, 1, unit_size, fout);
+      ++tu_index2;
+    }
   }
 
   int total_tus = tu_index1 + tu_index2;
