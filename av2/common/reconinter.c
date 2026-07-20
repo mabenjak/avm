@@ -1965,6 +1965,14 @@ void av2_build_one_bawp_inter_predictor(
 
   int ref_h = bh;
   if ((mi_y_p + bh) >= height_p) ref_h = height_p - mi_y_p;
+#if CONFIG_EXP_BAWP_CLIPPING
+
+  assert(ref_w > 0 && ref_h > 0);
+
+  const int ref_x = clamp(mi_x_p + x_off_p, BAWP_REF_LINES, width_p - ref_w);
+  const int ref_y = clamp(mi_y_p + y_off_p, BAWP_REF_LINES, height_p - ref_h);
+  {
+#else
   if ((mi_x_p + x_off_p - BAWP_REF_LINES) < 0 ||
       (mi_y_p + y_off_p - BAWP_REF_LINES) < 0 || ref_w <= 0 || ref_h <= 0 ||
       (mi_x_p + ref_w + x_off_p) > width_p ||
@@ -1974,6 +1982,7 @@ void av2_build_one_bawp_inter_predictor(
         "Inter BAWP template cannot outside the valid reference range");
     return;
   } else {
+#endif
     uint16_t *recon_buf = xd->plane[plane].dst.buf;
     int recon_stride = xd->plane[plane].dst.stride;
     if (dst_orig != NULL) {
@@ -1986,7 +1995,11 @@ void av2_build_one_bawp_inter_predictor(
     // the picture boundary limitation to be
     // checked.
     const int ref_stride = pd->pre[ref].stride;
+#if CONFIG_EXP_BAWP_CLIPPING
+    uint16_t *ref_buf = pd->pre[ref].buf0 + ref_y * ref_stride + ref_x;
+#else
     uint16_t *ref_buf = pd->pre[ref].buf + y_off_p * ref_stride + x_off_p;
+#endif
     uint16_t *ref_top = ref_buf - BAWP_REF_LINES * ref_stride;
     uint16_t *ref_left = ref_buf - BAWP_REF_LINES;
     if (mbmi->bawp_flag[0] > 1 && plane == 0) {

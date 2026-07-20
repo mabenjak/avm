@@ -136,6 +136,9 @@ set_avm_config_var(CONFIG_DIP_EXT_PRUNING 1 "AV2 DIP TFLite pruning.")
 set_avm_config_var(CONFIG_THROUGHPUT_ANALYSIS 0
                    "AV2 experiment flag to measure throughput.")
 
+set_avm_config_var(CONFIG_EXP_BAWP_CLIPPING 1
+                   "Clip coordinates of BAWP reference if out of frame bounds.")
+
 set_avm_config_var(
   CONFIG_QM_DEBUG 0
   "Enable debug information for extension to AV2 quantization matrices.")
