@@ -3580,6 +3580,11 @@ static int encode_with_recode_loop(AV2_COMP *cpi, size_t *size, uint8_t *dest) {
   // Determine whether to use screen content tools using two fast encoding.
   av2_determine_sc_tools_with_encoding(cpi, q);
 
+  if (cpi->rc.intrabc_disabled_after_sframe && !frame_is_intra_only(cm) &&
+      !frame_is_sframe(cm) && cm->seq_params.enable_refmvbank) {
+    cm->features.allow_intrabc = 0;
+  }
+
   if (cm->features.allow_intrabc) {
     set_max_bvp_drl_bits(cpi);
   }
@@ -4561,6 +4566,32 @@ static int encode_frame_to_data_rate(AV2_COMP *cpi, size_t *size, uint8_t *dest,
     features->kf_allow_sc_tools = features->allow_screen_content_tools;
   }
   cpi->is_screen_content_type = features->allow_screen_content_tools;
+  // IntraBC block vectors are stored in the reference MV bank, which is shared
+  // with inter motion vectors. After a stream switch at a restricted switch
+  // frame, inter motion vectors can differ from what the encoder assumed, so
+  // the IntraBC entries that the block vector predictor relies on may be
+  // evicted from the bank. Disable IntraBC for the inter frames following a
+  // switch frame until a key frame has fully refreshed the reference state.
+  // Intra frames are safe, because they contain no inter blocks that could
+  // occupy the bank.
+  const int is_leading_pic =
+      cm->last_olk_disp_order_hint > current_frame->display_order_hint;
+  if (current_frame->cm_obu_type == OBU_CLOSED_LOOP_KEY ||
+      (cpi->olk_encountered && current_frame->frame_type != KEY_FRAME &&
+       !is_leading_pic &&
+       !(cpi->gf_group.update_type[cpi->gf_group.index] ==
+             FWD_KF_OVERLAY_UPDATE ||
+         cpi->gf_group.update_type[cpi->gf_group.index] ==
+             FWD_KF_SUCCESSOR_UPDATE))) {
+    cpi->rc.intrabc_disabled_after_sframe = 0;
+  }
+  if (frame_is_sframe(cm)) {
+    cpi->rc.intrabc_disabled_after_sframe = 1;
+  }
+  if (cpi->rc.intrabc_disabled_after_sframe && !frame_is_intra_only(cm) &&
+      !frame_is_sframe(cm) && seq_params->enable_refmvbank) {
+    features->allow_intrabc = 0;
+  }
   if (cm->features.allow_intrabc) {
     cm->features.allow_global_intrabc =
         (oxcf->kf_cfg.enable_intrabc_ext != 2) && frame_is_intra_only(cm);
