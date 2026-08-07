@@ -4588,6 +4588,15 @@ static int encode_frame_to_data_rate(AV2_COMP *cpi, size_t *size, uint8_t *dest,
   // temporal set of frame level enable_bawp flag.
   features->enable_bawp = seq_params->enable_bawp;
   features->enable_intra_bawp = seq_params->enable_bawp;
+
+  if (current_frame->frame_type == KEY_FRAME) {
+    cpi->rc.bawp_disabled_after_sframe = 0;
+  } else if (cpi->rc.bawp_disabled_after_sframe) {
+    features->enable_bawp = 0;
+  }
+  if (frame_is_sframe(cm)) {
+    cpi->rc.bawp_disabled_after_sframe = 1;
+  }
   features->enable_cwp = seq_params->enable_cwp;
 
   features->enable_imp_msk_bld = seq_params->enable_imp_msk_bld;
