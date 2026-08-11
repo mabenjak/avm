@@ -292,6 +292,11 @@ typedef struct {
   int resize_avg_qp;
   int resize_buffer_underflow;
   int resize_count;
+
+  // Set to 1 at a switch frame and cleared once a key frame has fully
+  // refreshed the reference state. While set, BAWP is disabled for the inter
+  // frames that follow the switch frame.
+  int bawp_disabled_after_sframe;
   /*!\endcond */
 } RATE_CONTROL;
 

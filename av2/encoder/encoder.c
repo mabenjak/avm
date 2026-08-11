@@ -4586,6 +4586,34 @@ static int encode_frame_to_data_rate(AV2_COMP *cpi, size_t *size, uint8_t *dest,
   // temporal set of frame level enable_bawp flag.
   features->enable_bawp = seq_params->enable_bawp;
   features->enable_intra_bawp = seq_params->enable_bawp;
+  // BAWP derives its per-block prediction weights from the already
+  // reconstructed neighbors of the current block and the co-located samples in
+  // the reference frame. After a stream switch at a restricted switch frame,
+  // the reference samples differ from what the encoder assumed, so the derived
+  // weights drift and the reconstruction diverges. Disable BAWP for the inter
+  // frames following a switch frame until a key frame has fully refreshed the
+  // reference state, i.e. at a CLK and after the leading pictures of an OLK.
+  // Intra frames do not signal the frame level flag and stay untouched, and so
+  // does the switch frame itself, where BAWP is already blocked by the
+  // restricted reference handling.
+  const int bawp_is_leading_pic =
+      cm->last_olk_disp_order_hint > current_frame->display_order_hint;
+  if (current_frame->cm_obu_type == OBU_CLOSED_LOOP_KEY ||
+      (cpi->olk_encountered && current_frame->frame_type != KEY_FRAME &&
+       !bawp_is_leading_pic &&
+       !(cpi->gf_group.update_type[cpi->gf_group.index] ==
+             FWD_KF_OVERLAY_UPDATE ||
+         cpi->gf_group.update_type[cpi->gf_group.index] ==
+             FWD_KF_SUCCESSOR_UPDATE))) {
+    cpi->rc.bawp_disabled_after_sframe = 0;
+  }
+  if (frame_is_sframe(cm)) {
+    cpi->rc.bawp_disabled_after_sframe = 1;
+  }
+  if (cpi->rc.bawp_disabled_after_sframe && !frame_is_intra_only(cm) &&
+      !frame_is_sframe(cm)) {
+    features->enable_bawp = 0;
+  }
   features->enable_cwp = seq_params->enable_cwp;
 
   features->enable_imp_msk_bld = seq_params->enable_imp_msk_bld;
